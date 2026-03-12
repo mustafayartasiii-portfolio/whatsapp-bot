@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "ttf-dejavu"]
+nixPkgs = ["chromium", "nss", "freetype", "harfbuzz", "ca-certificates", "fontconfig", "dbus", "expat", "libdrm", "mesa", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "xorg.libxcb", "xorg.libXcursor", "xorg.libXi", "xorg.libXrender", "xorg.libXtst", "xorg.libxshmfence"]
 
 [variables]
 PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true"
