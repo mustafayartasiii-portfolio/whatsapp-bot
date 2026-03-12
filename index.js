@@ -1,19 +1,14 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
-const axios = require('axios');
+const qrcode = require('qrcode');
 const fs = require('fs');
 
 const app = express();
 app.use(express.json());
 
-// ─── AYARLAR ───────────────────────────────────────────────────────
-const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'alpyentur2024';
-
-// Hasta verilerini dosyaya kaydet (Railway yeniden başlayınca silinmesin diye)
+// ─── STATE YÖNETİMİ ────────────────────────────────────────────────
 const STATE_FILE = './hasta_durumu.json';
 
-// ─── STATE YÖNETİMİ ────────────────────────────────────────────────
 function loadState() {
   try {
     if (fs.existsSync(STATE_FILE)) {
@@ -26,12 +21,56 @@ function loadState() {
 function saveState(state) {
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (e) {
-    console.error('State kayıt hatası:', e);
-  }
+  } catch (e) {}
 }
 
 let userState = loadState();
+let qrCodeData = null;
+let isReady = false;
+
+// ─── WHATSAPP CLIENT ───────────────────────────────────────────────
+const client = new Client({
+  authStrategy: new LocalAuth(),
+  puppeteer: {
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-gpu'
+    ],
+  }
+});
+
+client.on('qr', async (qr) => {
+  console.log('QR kod oluşturuldu, tarayın!');
+  qrCodeData = await qrcode.toDataURL(qr);
+});
+
+client.on('ready', () => {
+  console.log('✅ WhatsApp bağlandı, bot hazır!');
+  isReady = true;
+  qrCodeData = null;
+});
+
+client.on('disconnected', () => {
+  console.log('WhatsApp bağlantısı kesildi, yeniden başlatılıyor...');
+  isReady = false;
+  client.initialize();
+});
+
+client.on('message', async (message) => {
+  if (message.isGroupMsg) return; // Grup mesajlarını atla
+  const from = message.from;
+  const text = message.body;
+  console.log(`[${new Date().toLocaleTimeString('tr-TR')}] ${from}: ${text}`);
+  await mesajiisle(from, text, message);
+});
+
+client.initialize();
 
 // ─── MESAJ ŞABLONLARI ──────────────────────────────────────────────
 const HOSGELDINIZ = `Merhaba, *Prof. Dr. Alp Yentür Kliniği*'ne hoş geldiniz. 👋
@@ -54,37 +93,23 @@ const KVKK = `📋 *AÇIK RIZA METNİ*
 • Hizmet kalitesinin artırılması ve kayıtların tutulması
 
 *3) Aktarım*
-Verileriniz; yalnızca yukarıdaki amaçlarla sınırlı olmak üzere, hizmetin yürütülmesi için gerekli olması halinde yetkili personel ve teknik hizmet sağlayıcılarla paylaşılabilir.
+Verileriniz; yalnızca yukarıdaki amaçlarla sınırlı olmak üzere yetkili personel ve teknik hizmet sağlayıcılarla paylaşılabilir.
 
 *4) Rıza ve Geri Alma Hakkı*
 Bu metni onaylayarak kişisel verilerinizin işlenmesine açık rıza vermiş olursunuz. Rızanızı dilediğiniz zaman geri alabilirsiniz.
 
 ━━━━━━━━━━━━━━━━━━━━━━━
-Kişisel verilerinizin işlenmesini kabul ediyorsanız, lütfen aşağıdaki mesajı yazınız:
+Kişisel verilerinizin işlenmesini kabul ediyorsanız, lütfen şunu yazınız:
 
 👉 *Okudum, onaylıyorum*`;
 
 // ─── MESAJ GÖNDER ──────────────────────────────────────────────────
 async function sendMessage(to, text) {
   try {
-    await axios.post(
-      `https://graph.facebook.com/v18.0/${PHONE_NUMBER_ID}/messages`,
-      {
-        messaging_product: 'whatsapp',
-        to: to,
-        type: 'text',
-        text: { body: text }
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${ACCESS_TOKEN}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    await client.sendMessage(to, text);
     await bekle(500);
   } catch (e) {
-    console.error('Mesaj gönderme hatası:', e.response?.data || e.message);
+    console.error('Mesaj gönderme hatası:', e.message);
   }
 }
 
@@ -92,19 +117,10 @@ function bekle(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// ─── HASTA ÖZET RAPORU ─────────────────────────────────────────────
+// ─── HASTA RAPORU ──────────────────────────────────────────────────
 function formatRapor(phone, data) {
   const bolge = data.region || '';
-  let rapor = `📊 *YENİ HASTA BAŞVURUSU*
-━━━━━━━━━━━━━━━━━━━━━━━
-📞 Telefon: ${phone}
-👤 Ad Soyad: ${data.name || '-'}
-🎂 Yaş: ${data.age || '-'}
-⚥ Cinsiyet: ${data.gender || '-'}
-⚖️ Kilo: ${data.weight || '-'} kg
-📏 Boy: ${data.height || '-'} cm
-🏥 Şikayet Bölgesi: ${bolge}
-━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  let rapor = `📊 *YENİ HASTA BAŞVURUSU*\n━━━━━━━━━━━━━━━━━━━━━━━\n📞 Telefon: ${phone}\n👤 Ad Soyad: ${data.name || '-'}\n🎂 Yaş: ${data.age || '-'}\n⚥ Cinsiyet: ${data.gender || '-'}\n⚖️ Kilo: ${data.weight || '-'} kg\n📏 Boy: ${data.height || '-'} cm\n🏥 Şikayet Bölgesi: ${bolge}\n━━━━━━━━━━━━━━━━━━━━━━━\n`;
 
   if (data.kol_side) {
     rapor += `\n🦾 *KOL - BOYUN BİLGİLERİ*\n`;
@@ -154,11 +170,10 @@ function formatRapor(phone, data) {
 }
 
 // ─── ANA BOT MANTIĞI ───────────────────────────────────────────────
-async function mesajiisle(from, text) {
+async function mesajiisle(from, text, message) {
   const lower = text.toLowerCase().trim();
   const state = userState[from] || { step: 'new', data: {} };
 
-  // Yeniden başlatma komutu
   if (lower === 'yeniden başla' || lower === 'yeniden basla' || lower === 'restart') {
     delete userState[from];
     saveState(userState);
@@ -167,8 +182,6 @@ async function mesajiisle(from, text) {
   }
 
   switch (state.step) {
-
-    // ── KARŞILAMA ──────────────────────────────────────────────────
     case 'new':
       await sendMessage(from, HOSGELDINIZ);
       await bekle(1500);
@@ -176,17 +189,15 @@ async function mesajiisle(from, text) {
       state.step = 'kvkk_bekleniyor';
       break;
 
-    // ── KVKK ONAYI ─────────────────────────────────────────────────
     case 'kvkk_bekleniyor':
       if (lower.includes('onaylıyorum') || lower.includes('onayliyorum') || lower.includes('okudum')) {
-        await sendMessage(from, '✅ *Onayınız başarıyla alınmıştır, teşekkür ederiz.*\n\nŞimdi size birkaç bilgi soracağız. Hazır olduğunuzda cevap verebilirsiniz.\n\n━━━━━━━━━━━━━━━━━━━━━━━\n\n👤 *Adınız ve soyadınız nedir?*');
+        await sendMessage(from, '✅ *Onayınız başarıyla alınmıştır, teşekkür ederiz.*\n\nŞimdi size birkaç bilgi soracağız.\n\n━━━━━━━━━━━━━━━━━━━━━━━\n\n👤 *Adınız ve soyadınız nedir?*');
         state.step = 'isim_bekleniyor';
       } else {
         await sendMessage(from, '⚠️ Devam edebilmemiz için lütfen:\n\n👉 *Okudum, onaylıyorum*\n\nyazarak onayınızı veriniz.');
       }
       break;
 
-    // ── KİŞİSEL BİLGİLER ──────────────────────────────────────────
     case 'isim_bekleniyor':
       state.data.name = text;
       await sendMessage(from, `Merhaba ${text.split(' ')[0]}! 😊\n\n🎂 *Yaşınız kaç?*`);
@@ -201,13 +212,13 @@ async function mesajiisle(from, text) {
 
     case 'cinsiyet_bekleniyor':
       state.data.gender = text;
-      await sendMessage(from, '⚖️ *Kilonuz?* (kg olarak yazınız)\n\nÖrnek: 75');
+      await sendMessage(from, '⚖️ *Kilonuz?* (kg)\n\nÖrnek: 75');
       state.step = 'kilo_bekleniyor';
       break;
 
     case 'kilo_bekleniyor':
       state.data.weight = text;
-      await sendMessage(from, '📏 *Boyunuz?* (cm olarak yazınız)\n\nÖrnek: 175');
+      await sendMessage(from, '📏 *Boyunuz?* (cm)\n\nÖrnek: 175');
       state.step = 'boy_bekleniyor';
       break;
 
@@ -217,28 +228,26 @@ async function mesajiisle(from, text) {
       state.step = 'bolge_bekleniyor';
       break;
 
-    // ── BÖLGE SEÇİMİ ───────────────────────────────────────────────
     case 'bolge_bekleniyor':
       state.data.region = text;
       if (lower.includes('kol') || lower.includes('boyun') || lower === '1') {
         await sendMessage(from, '🦾 *KOL ŞİKAYETİ*\n\nKol şikayetiniz hangi tarafta?\n\n• *Sağ*\n• *Sol*\n• *İki taraf*');
         state.step = 'kol_taraf';
       } else if (lower.includes('bel') || lower === '2') {
-        await sendMessage(from, '🦵 *BEL ŞİKAYETİ*\n\nNeresi ağrıyor?\n\n• *Bel*\n• *Kalça*\n• *Bacak*\n• *Bel ve bacak* (ikisi birden)');
+        await sendMessage(from, '🦵 *BEL ŞİKAYETİ*\n\nNeresi ağrıyor?\n\n• *Bel*\n• *Kalça*\n• *Bacak*\n• *Bel ve bacak*');
         state.step = 'bel_yer';
       } else if (lower.includes('sırt') || lower.includes('sirt') || lower === '3') {
         state.data.region = 'Sırt';
         await bitir(from, state);
         return;
       } else {
-        await sendMessage(from, '⚠️ Lütfen *1 (Kol-Boyun)*, *2 (Bel)* veya *3 (Sırt)* yazınız.');
+        await sendMessage(from, '⚠️ Lütfen *1*, *2* veya *3* yazınız.');
       }
       break;
 
-    // ── KOL SORULARI ───────────────────────────────────────────────
     case 'kol_taraf':
       state.data.kol_side = text;
-      await sendMessage(from, 'Ağrı / şikayet nereye kadar uzanıyor?\n\n• *Sadece boyun*\n• *Sırt*\n• *Dirseğe kadar*\n• *Ele kadar*\n• *Parmaklara kadar*');
+      await sendMessage(from, 'Ağrı nereye kadar uzanıyor?\n\n• *Sadece boyun*\n• *Sırt*\n• *Dirseğe kadar*\n• *Ele kadar*\n• *Parmaklara kadar*');
       state.step = 'kol_yayilim';
       break;
 
@@ -251,7 +260,7 @@ async function mesajiisle(from, text) {
     case 'kol_uyusma':
       state.data.kol_numbness = text;
       if (lower.includes('evet')) {
-        await sendMessage(from, 'Hangi parmaklara geliyor?\n\n(Örnek: baş parmak, işaret parmağı, serçe parmak vb.)');
+        await sendMessage(from, 'Hangi parmaklara geliyor?\n\n(Örnek: baş parmak, serçe parmak)');
         state.step = 'kol_parmak';
       } else {
         state.data.kol_fingers = 'Yok';
@@ -274,19 +283,19 @@ async function mesajiisle(from, text) {
 
     case 'kol_kuvvetsizlik':
       state.data.kol_weakness = text;
-      await sendMessage(from, 'Daha önce *ameliyat* geçirdiniz mi?\n\n• *Evet* (varsa açıklayınız)\n• *Hayır*');
+      await sendMessage(from, 'Daha önce *ameliyat* geçirdiniz mi?\n\n• *Evet*\n• *Hayır*');
       state.step = 'kol_ameliyat';
       break;
 
     case 'kol_ameliyat':
       state.data.kol_surgery = text;
-      await sendMessage(from, 'Daha önce *EMG* çektirdiniz mi?\n\n• *Evet* (raporunuzu paylaşabilirsiniz)\n• *Hayır*');
+      await sendMessage(from, '*EMG* çektirdiniz mi?\n\n• *Evet*\n• *Hayır*');
       state.step = 'kol_emg';
       break;
 
     case 'kol_emg':
       state.data.kol_emg = text;
-      await sendMessage(from, '*MR raporunuz* var mı?\n\n• *Evet* (raporunuzu paylaşabilirsiniz)\n• *Hayır*');
+      await sendMessage(from, '*MR raporunuz* var mı?\n\n• *Evet*\n• *Hayır*');
       state.step = 'kol_mr';
       break;
 
@@ -296,16 +305,15 @@ async function mesajiisle(from, text) {
       state.step = 'boyun_bas_agrisi';
       break;
 
-    // ── BOYUN SORULARI ─────────────────────────────────────────────
     case 'boyun_bas_agrisi':
       state.data.boyun_headache = text;
-      await sendMessage(from, 'Boyun / omuz ağrısı *ne zamandır* devam ediyor?\n\n• *Sürekli*\n• *Zaman zaman*');
+      await sendMessage(from, 'Ağrı ne zamandır devam ediyor?\n\n• *Sürekli*\n• *Zaman zaman*');
       state.step = 'boyun_sure';
       break;
 
     case 'boyun_sure':
       state.data.boyun_when = text;
-      await sendMessage(from, '*Kaza geçmişiniz* veya *ameliyat geçmişiniz* var mı?\n\n• *Evet* (açıklayınız)\n• *Hayır*');
+      await sendMessage(from, '*Kaza* veya *ameliyat* geçmişiniz var mı?\n\n• *Evet*\n• *Hayır*');
       state.step = 'boyun_kaza';
       break;
 
@@ -317,7 +325,7 @@ async function mesajiisle(from, text) {
 
     case 'boyun_yuruyus':
       state.data.boyun_walk = text;
-      await sendMessage(from, 'Boyun için *MR raporunuz* var mı?\n\n• *Evet* (raporunuzu paylaşabilirsiniz)\n• *Hayır*');
+      await sendMessage(from, 'Boyun için *MR raporunuz* var mı?\n\n• *Evet*\n• *Hayır*');
       state.step = 'boyun_mr';
       break;
 
@@ -326,7 +334,6 @@ async function mesajiisle(from, text) {
       await bitir(from, state);
       return;
 
-    // ── BEL SORULARI ───────────────────────────────────────────────
     case 'bel_yer':
       state.data.bel_where = text;
       await sendMessage(from, 'Ağrı hangi tarafta?\n\n• *Sağ*\n• *Sol*\n• *İki taraf*\n• *Ortada*');
@@ -335,7 +342,7 @@ async function mesajiisle(from, text) {
 
     case 'bel_taraf':
       state.data.bel_side = text;
-      await sendMessage(from, 'Ağrı *ne zamandan beri* var?\n\n(Örnek: 3 aydır, 1 haftadır)');
+      await sendMessage(from, 'Ağrı *ne zamandan beri* var?\n\nÖrnek: 3 aydır, 1 haftadır');
       state.step = 'bel_sure';
       break;
 
@@ -353,7 +360,7 @@ async function mesajiisle(from, text) {
 
     case 'bel_diz':
       state.data.bel_knee = text;
-      await sendMessage(from, 'Ağrı *ayak parmağına* kadar geliyor mu?\n\n• *Evet* (hangi parmaklara geldiğini belirtiniz)\n• *Hayır*');
+      await sendMessage(from, 'Ağrı *ayak parmağına* kadar geliyor mu?\n\n• *Evet* (hangi parmaklar?)\n• *Hayır*');
       state.step = 'bel_parmak';
       break;
 
@@ -365,13 +372,13 @@ async function mesajiisle(from, text) {
 
     case 'bel_uyusma':
       state.data.bel_numbness = text;
-      await sendMessage(from, 'Ayak parmağına veya topuğa *basabiliyor* musunuz?\n_(İki ayakta birden)_\n\n• *Evet*\n• *Hayır*\n• *Zor basıyorum*');
+      await sendMessage(from, 'Ayak parmağına veya topuğa *basabiliyor* musunuz?\n\n• *Evet*\n• *Hayır*\n• *Zor basıyorum*');
       state.step = 'bel_parmak_bas';
       break;
 
     case 'bel_parmak_bas':
       state.data.bel_walk = text;
-      await sendMessage(from, '*Yatarken* ağrı var mı? Nerede?\n\n• *Evet* (nerede olduğunu belirtiniz)\n• *Hayır*');
+      await sendMessage(from, '*Yatarken* ağrı var mı? Nerede?\n\n• *Evet*\n• *Hayır*');
       state.step = 'bel_yatarken';
       break;
 
@@ -383,19 +390,19 @@ async function mesajiisle(from, text) {
 
     case 'bel_en_kotu':
       state.data.bel_worst = text;
-      await sendMessage(from, 'En *rahat* ne zaman hissediyorsunuz?\n\n• *Yatarken*\n• *Otururken*\n• *Yürürken*');
+      await sendMessage(from, 'En *rahat* ne zaman?\n\n• *Yatarken*\n• *Otururken*\n• *Yürürken*');
       state.step = 'bel_en_iyi';
       break;
 
     case 'bel_en_iyi':
       state.data.bel_best = text;
-      await sendMessage(from, 'Ne kadar *yürüyebiliyorsunuz?*\nDinlene dinlene aynı mesafeleri arka arkaya yürüyebiliyor musunuz?\n\n(Belirtiniz, örnek: 500 metre, 2-3 dakika)');
+      await sendMessage(from, 'Ne kadar *yürüyebiliyorsunuz?*\n\nÖrnek: 500 metre, 2-3 dakika');
       state.step = 'bel_mesafe';
       break;
 
     case 'bel_mesafe':
       state.data.bel_distance = text;
-      await sendMessage(from, 'Aniden çok şiddetli *tutulma* oldu mu?\n\n• *Evet* (sağ/sol belirtiniz)\n• *Hayır*');
+      await sendMessage(from, 'Aniden çok şiddetli *tutulma* oldu mu?\n\n• *Evet* (sağ/sol)\n• *Hayır*');
       state.step = 'bel_tutulma';
       break;
 
@@ -425,25 +432,25 @@ async function mesajiisle(from, text) {
 
     case 'bel_yatma':
       state.data.bel_bed = text;
-      await sendMessage(from, 'Yatakta *sağa sola dönerken* belde ağrı var mı?\n\n• *Evet*\n• *Hayır*');
+      await sendMessage(from, 'Yatakta *sağa sola dönerken* ağrı var mı?\n\n• *Evet*\n• *Hayır*');
       state.step = 'bel_donme';
       break;
 
     case 'bel_donme':
       state.data.bel_turn = text;
-      await sendMessage(from, 'Uzun süre *oturunca* veya *ayakta kalınca* belde/kalçada ağrı artıyor mu?\n(Hangisinde olduğunu belirtiniz)\n\n• *Evet*\n• *Hayır*');
+      await sendMessage(from, 'Uzun süre *oturunca* veya *ayakta kalınca* ağrı artıyor mu?\n\n• *Evet*\n• *Hayır*');
       state.step = 'bel_uzun_oturma';
       break;
 
     case 'bel_uzun_oturma':
       state.data.bel_long_sit = text;
-      await sendMessage(from, '*Sabah yataktan kalkınca* belde/kalçada ağrı oluyor mu?\n_(Hareketlenince azalıyor mu?)_\n\n• *Evet* (azalıyorsa belirtiniz)\n• *Hayır*');
+      await sendMessage(from, '*Sabah yataktan kalkınca* belde ağrı oluyor mu?\n_(Hareketlenince azalıyor mu?)_\n\n• *Evet*\n• *Hayır*');
       state.step = 'bel_sabah';
       break;
 
     case 'bel_sabah':
       state.data.bel_morning = text;
-      await sendMessage(from, '*Kalçanın üst kısmında* (leğen kemiğinin üstünde) bir tarafta ağrı var mı?\n\n• *Evet* (sağ/sol belirtiniz)\n• *Hayır*');
+      await sendMessage(from, '*Kalçanın üst kısmında* (leğen kemiği üstünde) ağrı var mı?\n\n• *Evet* (sağ/sol)\n• *Hayır*');
       state.step = 'bel_legen';
       break;
 
@@ -452,7 +459,6 @@ async function mesajiisle(from, text) {
       await bitir(from, state);
       return;
 
-    // ── TAMAMLANDI ─────────────────────────────────────────────────
     case 'done':
       await sendMessage(from, 'Başvurunuz zaten alınmıştır. ✅\n\nMüşteri temsilcimiz en kısa sürede sizinle ilgilenecektir.\n\n_Yeni başvuru için: *yeniden başla* yazınız._');
       return;
@@ -469,81 +475,87 @@ async function mesajiisle(from, text) {
   saveState(userState);
 }
 
-// ─── BİTİŞ MESAJI VE DOKTOR BİLDİRİMİ ────────────────────────────
 async function bitir(from, state) {
   state.step = 'done';
   userState[from] = state;
   saveState(userState);
 
-  await sendMessage(from,
-    '✅ *Bilgileriniz başarıyla alınmıştır.*\n\nMüşteri temsilcimiz en kısa sürede sizinle ilgilenecektir. 🙏\n\n*Prof. Dr. Alp Yentür Kliniği*'
-  );
+  await sendMessage(from, '✅ *Bilgileriniz başarıyla alınmıştır.*\n\nMüşteri temsilcimiz en kısa sürede sizinle ilgilenecektir. 🙏\n\n*Prof. Dr. Alp Yentür Kliniği*');
 
-  // Doktora rapor gönder (konsola yaz, ilerleyen aşamada e-posta eklenebilir)
   const rapor = formatRapor(from, state.data);
   console.log('\n' + '='.repeat(50));
   console.log('YENİ HASTA:', new Date().toLocaleString('tr-TR'));
   console.log(rapor);
   console.log('='.repeat(50) + '\n');
-
-  // İstersen buraya e-posta gönderme kodu eklenebilir
 }
 
-// ─── WEBHOOK ──────────────────────────────────────────────────────
-// Meta webhook doğrulama
-app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('Webhook doğrulandı ✓');
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
-});
-
-// Gelen mesajları al
-app.post('/webhook', async (req, res) => {
-  res.sendStatus(200); // Meta'ya hemen 200 dön
-
-  try {
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0];
-    const value = change?.value;
-    const messages = value?.messages;
-
-    if (messages && messages.length > 0) {
-      const message = messages[0];
-      const from = message.from;
-
-      // Sadece metin mesajlarını işle
-      if (message.type === 'text') {
-        const text = message.text.body;
-        console.log(`[${new Date().toLocaleTimeString('tr-TR')}] ${from}: ${text}`);
-        await mesajiisle(from, text);
-      } else if (message.type === 'image' || message.type === 'document') {
-        await sendMessage(from, '📎 Dosyanız alındı, teşekkür ederiz. Müşteri temsilcimiz inceleyecektir.');
-      }
-    }
-  } catch (error) {
-    console.error('İşlem hatası:', error.message);
-  }
-});
-
-// Sağlık kontrolü
+// ─── WEB PANEL ─────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'Bot çalışıyor ✓', 
-    time: new Date().toLocaleString('tr-TR'),
-    hastaSayisi: Object.keys(userState).length
-  });
+  if (!isReady && qrCodeData) {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>WhatsApp Bot - QR Kod</title>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="10">
+        <style>
+          body { font-family: Arial; text-align: center; padding: 50px; background: #f0f0f0; }
+          h1 { color: #25D366; }
+          img { border: 3px solid #25D366; border-radius: 10px; padding: 10px; background: white; }
+          p { color: #666; }
+        </style>
+      </head>
+      <body>
+        <h1>📱 WhatsApp Bot</h1>
+        <h2>QR Kodu Telefonunuzdan Tarayın</h2>
+        <img src="${qrCodeData}" width="300" />
+        <p>WhatsApp → Bağlı Cihazlar → Cihaz Ekle → QR Kodu Tara</p>
+        <p><small>Sayfa otomatik yenileniyor...</small></p>
+      </body>
+      </html>
+    `);
+  } else if (isReady) {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>WhatsApp Bot - Aktif</title>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial; text-align: center; padding: 50px; background: #f0f0f0; }
+          h1 { color: #25D366; }
+          .status { background: #25D366; color: white; padding: 20px; border-radius: 10px; display: inline-block; }
+        </style>
+      </head>
+      <body>
+        <h1>🤖 Prof. Dr. Alp Yentür WhatsApp Botu</h1>
+        <div class="status">✅ Bot Aktif ve Çalışıyor</div>
+        <p>Toplam Hasta: ${Object.keys(userState).length}</p>
+        <p>Sunucu Saati: ${new Date().toLocaleString('tr-TR')}</p>
+      </body>
+      </html>
+    `);
+  } else {
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta http-equiv="refresh" content="5">
+      </head>
+      <body style="text-align:center;padding:50px;font-family:Arial">
+        <h2>⏳ Bot başlatılıyor, lütfen bekleyin...</h2>
+        <p>Sayfa otomatik yenileniyor</p>
+      </body>
+      </html>
+    `);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\n🤖 Prof. Dr. Alp Yentür WhatsApp Botu`);
-  console.log(`📡 Port: ${PORT}`);
-  console.log(`✓ Çalışıyor\n`);
+  console.log(`🌐 Panel: http://localhost:${PORT}`);
+  console.log(`⏳ WhatsApp bağlantısı bekleniyor...\n`);
 });
